@@ -17,6 +17,7 @@ const io = new Server(server, {
 // Store rooms
 // Room = { id, status: 'waiting' | 'playing', players: [{ id, name, colorIndex }], numPlayers, host }
 const rooms = new Map();
+const disconnectTimers = new Map();
 
 const generateRoomCode = () => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -28,9 +29,9 @@ const generateRoomCode = () => {
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
-  socket.on('create_room', ({ name, numPlayers }) => {
+  socket.on('create_room', ({ name, numPlayers, userId }) => {
     const roomId = generateRoomCode();
-    const player = { id: socket.id, name, colorIndex: 0 };
+    const player = { id: socket.id, userId, name, colorIndex: 0 };
     
     rooms.set(roomId, {
       id: roomId,
@@ -44,7 +45,7 @@ io.on('connection', (socket) => {
     socket.emit('room_created', { roomId, player, room: rooms.get(roomId) });
   });
 
-  socket.on('join_room', ({ roomId, name }) => {
+  socket.on('join_room', ({ roomId, name, userId }) => {
     const room = rooms.get(roomId);
     if (!room) {
       return socket.emit('error', 'Room not found');
@@ -57,7 +58,7 @@ io.on('connection', (socket) => {
     }
 
     const colorIndex = room.players.length;
-    const player = { id: socket.id, name, colorIndex };
+    const player = { id: socket.id, userId, name, colorIndex };
     room.players.push(player);
 
     socket.join(roomId);
@@ -91,24 +92,60 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('rejoin_room', ({ roomId, userId }) => {
+    const room = rooms.get(roomId);
+    if (!room) return;
+    const player = room.players.find(p => p.userId === userId);
+    if (player) {
+      if (disconnectTimers.has(userId)) {
+        clearTimeout(disconnectTimers.get(userId));
+        disconnectTimers.delete(userId);
+      }
+      
+      if (room.host === player.id) {
+         room.host = socket.id;
+      }
+      player.id = socket.id;
+      socket.join(roomId);
+      
+      socket.emit('rejoined_room', { room, player });
+      socket.to(roomId).emit('player_joined', { player, room });
+    }
+  });
+
   socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
-    // Remove player from rooms
+    let disconnectedPlayer = null;
+    let disconnectedRoomId = null;
     for (const [roomId, room] of rooms.entries()) {
-      const playerIndex = room.players.findIndex(p => p.id === socket.id);
-      if (playerIndex !== -1) {
-        room.players.splice(playerIndex, 1);
-        if (room.players.length === 0) {
-          rooms.delete(roomId);
-        } else {
-          // If host left, reassign host
-          if (room.host === socket.id) {
-            room.host = room.players[0].id;
-          }
-          io.to(roomId).emit('player_left', { id: socket.id, room });
-        }
+      const player = room.players.find(p => p.id === socket.id);
+      if (player) {
+        disconnectedPlayer = player;
+        disconnectedRoomId = roomId;
         break;
       }
+    }
+
+    if (disconnectedPlayer) {
+      const timer = setTimeout(() => {
+        const room = rooms.get(disconnectedRoomId);
+        if (room) {
+          const pIdx = room.players.findIndex(p => p.userId === disconnectedPlayer.userId);
+          if (pIdx !== -1) {
+            room.players.splice(pIdx, 1);
+            if (room.players.length === 0) {
+              rooms.delete(disconnectedRoomId);
+            } else {
+              if (room.host === disconnectedPlayer.id) {
+                room.host = room.players[0].id;
+              }
+              io.to(disconnectedRoomId).emit('player_left', { id: disconnectedPlayer.id, room });
+            }
+          }
+        }
+        disconnectTimers.delete(disconnectedPlayer.userId);
+      }, 60000); // 60 seconds grace period
+      
+      disconnectTimers.set(disconnectedPlayer.userId, timer);
     }
   });
 });
