@@ -83,6 +83,14 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('game_reset');
   });
 
+  socket.on('return_to_lobby', ({ roomId }) => {
+    const room = rooms.get(roomId);
+    if (room) {
+      room.status = 'waiting';
+      io.to(roomId).emit('returned_to_lobby', { room });
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
     // Remove player from rooms
